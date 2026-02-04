@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { getDb } from "./db.js";
+import getDb from "./db.js";
 
 const app = express();
 
