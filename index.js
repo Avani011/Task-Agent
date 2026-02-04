@@ -18,54 +18,53 @@ app.get("/", (req, res) => {
 });
 
 /* ================================
-   SQLite-backed Tools
+   SQLite-backed Tools (better-sqlite3)
+   - Sync DB operations (simple + reliable on Render)
 ================================ */
 
-// Create a new task
-async function createTask(title) {
-  const db = await getDb();
+function createTask(title) {
+  const db = getDb();
   const createdAt = new Date().toISOString();
+  const cleanTitle = title.trim();
 
-  const result = await db.run(
+  const stmt = db.prepare(
     "INSERT INTO tasks (title, done, createdAt) VALUES (?, 0, ?)",
-    [title.trim(), createdAt],
   );
+  const result = stmt.run(cleanTitle, createdAt);
 
   return {
-    id: result.lastID,
-    title: title.trim(),
+    id: Number(result.lastInsertRowid),
+    title: cleanTitle,
     done: false,
     createdAt,
   };
 }
 
-// List all tasks
-async function listTasks() {
-  const db = await getDb();
-  const rows = await db.all(
-    "SELECT id, title, done, createdAt FROM tasks ORDER BY id DESC",
-  );
+function listTasks() {
+  const db = getDb();
 
-  return rows.map((row) => ({
-    id: row.id,
-    title: row.title,
-    done: Boolean(row.done),
-    createdAt: row.createdAt,
+  const rows = db
+    .prepare("SELECT id, title, done, createdAt FROM tasks ORDER BY id DESC")
+    .all();
+
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    done: Boolean(r.done),
+    createdAt: r.createdAt,
   }));
 }
 
-// Complete a task
-async function completeTask(id) {
-  const db = await getDb();
+function completeTask(id) {
+  const db = getDb();
 
-  const task = await db.get(
-    "SELECT id, title, done, createdAt FROM tasks WHERE id = ?",
-    [id],
-  );
+  const task = db
+    .prepare("SELECT id, title, done, createdAt FROM tasks WHERE id = ?")
+    .get(id);
 
   if (!task) return null;
 
-  await db.run("UPDATE tasks SET done = 1 WHERE id = ?", [id]);
+  db.prepare("UPDATE tasks SET done = 1 WHERE id = ?").run(id);
 
   return {
     id: task.id,
@@ -81,18 +80,24 @@ async function completeTask(id) {
 function routeIntent(message) {
   const m = message.trim();
 
-  // add task buy milk
+  // add task buy milk | create task buy milk
   const addMatch = m.match(/^(add|create)\s+task\s+(.+)$/i);
   if (addMatch) {
     return { intent: "create_task", title: addMatch[2] };
   }
 
-  // list tasks
+  // todo buy milk
+  const todoMatch = m.match(/^todo\s+(.+)$/i);
+  if (todoMatch) {
+    return { intent: "create_task", title: todoMatch[1] };
+  }
+
+  // list tasks | show tasks
   if (/^(list|show)\s+tasks$/i.test(m)) {
     return { intent: "list_tasks" };
   }
 
-  // complete 1
+  // complete 2 | done 2
   const completeMatch = m.match(/^(complete|done)\s+(\d+)$/i);
   if (completeMatch) {
     return { intent: "complete_task", id: Number(completeMatch[2]) };
@@ -115,70 +120,75 @@ function formatTasks(tasks) {
 /* ================================
    Agent API Endpoint
 ================================ */
-app.post("/api/chat", async (req, res) => {
-  const { message } = req.body;
+app.post("/api/chat", (req, res) => {
+  try {
+    const { message } = req.body;
 
-  if (typeof message !== "string" || message.trim() === "") {
-    return res
-      .status(400)
-      .json({ error: "message must be a non-empty string" });
-  }
+    if (typeof message !== "string" || message.trim() === "") {
+      return res
+        .status(400)
+        .json({ error: "message must be a non-empty string" });
+    }
 
-  const action = routeIntent(message);
+    const action = routeIntent(message);
 
-  if (action.intent === "create_task") {
-    const task = await createTask(action.title);
-    const tasks = await listTasks();
+    if (action.intent === "create_task") {
+      const task = createTask(action.title);
+      const tasks = listTasks();
 
-    return res.json({
-      agent: "TaskAgent",
-      intent: "create_task",
-      reply: `Created task ✅: [${task.id}] ${task.title}`,
-      tasks,
-    });
-  }
-
-  if (action.intent === "list_tasks") {
-    const tasks = await listTasks();
-
-    return res.json({
-      agent: "TaskAgent",
-      intent: "list_tasks",
-      reply: formatTasks(tasks),
-      tasks,
-    });
-  }
-
-  if (action.intent === "complete_task") {
-    const task = await completeTask(action.id);
-
-    if (!task) {
       return res.json({
         agent: "TaskAgent",
-        intent: "complete_task",
-        reply: `No task found with id ${action.id}`,
+        intent: "create_task",
+        reply: `Created task ✅: [${task.id}] ${task.title}`,
+        tasks,
       });
     }
 
-    const tasks = await listTasks();
+    if (action.intent === "list_tasks") {
+      const tasks = listTasks();
+
+      return res.json({
+        agent: "TaskAgent",
+        intent: "list_tasks",
+        reply: formatTasks(tasks),
+        tasks,
+      });
+    }
+
+    if (action.intent === "complete_task") {
+      const task = completeTask(action.id);
+
+      if (!task) {
+        return res.json({
+          agent: "TaskAgent",
+          intent: "complete_task",
+          reply: `No task found with id ${action.id}`,
+        });
+      }
+
+      const tasks = listTasks();
+
+      return res.json({
+        agent: "TaskAgent",
+        intent: "complete_task",
+        reply: `Completed ✅: [${task.id}] ${task.title}`,
+        tasks,
+      });
+    }
 
     return res.json({
       agent: "TaskAgent",
-      intent: "complete_task",
-      reply: `Completed ✅: [${task.id}] ${task.title}`,
-      tasks,
+      intent: "unknown",
+      reply:
+        "I can help with tasks. Try:\n" +
+        "- add task <title>\n" +
+        "- list tasks\n" +
+        "- complete <id>",
     });
+  } catch (err) {
+    console.error("Error in /api/chat:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
-
-  return res.json({
-    agent: "TaskAgent",
-    intent: "unknown",
-    reply:
-      "I can help with tasks. Try:\n" +
-      "- add task <title>\n" +
-      "- list tasks\n" +
-      "- complete <id>",
-  });
 });
 
 /* ================================
